@@ -1,0 +1,21 @@
+[package]
+name = "lonely"
+version = "0.1.0"
+authors = ["Karl Bergström <karl.anton.bergstrom@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ahash = { version = "0.2", optional = true }
+crossbeam-channel = "0.4"
+crossbeam-utils = "0.7"
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features=false }
+tokio = { git = "https://github.com/tokio-rs/tokio.git" }
+num_cpus = "1.11"
+
+[features]
+tls_exec = []
+lb_ahash = ["ahash"]
