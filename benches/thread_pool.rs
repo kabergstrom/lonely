@@ -5,12 +5,16 @@ extern crate test;
 use lonely::{load_balance, Exec, ExecGroup, LocalSpawn};
 use tokio::sync::oneshot;
 
+use mimalloc::MiMalloc;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{mpsc, Arc};
 use std::task::{Context, Poll};
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 struct Backoff(usize);
 
@@ -28,27 +32,35 @@ impl Future for Backoff {
     }
 }
 
-const NUM_THREADS: usize = 2;
+const NUM_THREADS: usize = 4;
 
 fn make_exec_group(num_threads: usize) -> ExecGroup<load_balance::RoundRobin> {
-    let hash_builder =
-        std::hash::BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default();
+    let hash_builder = lonely::DefaultBuildHasher::default();
     let mut executor_group = ExecGroup::new(load_balance::RoundRobin::new(), hash_builder);
     for _ in 0..num_threads {
         let exec = Exec::new();
-        executor_group.add_executor(exec.send_handle());
+        let send_handle = exec.send_handle();
         let exec_send = exec.sendable();
         std::thread::spawn(move || {
             let exec = exec_send.into_exec();
             let mut reactor = tokio::net::driver::Reactor::new().unwrap();
             let handle = reactor.handle();
-            let guard = tokio::net::driver::set_default(&handle);
+            let _guard = tokio::net::driver::set_default(&handle);
             loop {
                 exec.poll();
-                reactor.turn(Some(std::time::Duration::from_millis(0)));
+                reactor
+                    .turn(Some(std::time::Duration::from_millis(0)))
+                    .expect("reactor error");
             }
-            drop(guard);
+            drop(_guard);
         });
+        let buf = lonely::Ring::new(4);
+        let future_buf = buf.clone();
+        send_handle.send(async move {
+            future_buf.push(1);
+        });
+        while let None = buf.pop() {}
+        executor_group.add_executor(send_handle);
     }
     executor_group
 }
@@ -67,18 +79,16 @@ fn spawn_many(b: &mut test::Bencher) {
         let tx = tx.clone();
 
         let rem = rem.clone();
-        threadpool.spawn_with_local_spawner(move |spawner| {
-            for _ in 0..NUM_SPAWN {
-                let tx = tx.clone();
-                let rem = rem.clone();
+        for _ in 0..NUM_SPAWN {
+            let tx = tx.clone();
+            let rem = rem.clone();
 
-                spawner.spawn(async move {
-                    if 1 == rem.fetch_sub(1, Relaxed) {
-                        tx.send(()).unwrap();
-                    }
-                });
-            }
-        });
+            threadpool.spawn(async move {
+                if 1 == rem.fetch_sub(1, Relaxed) {
+                    tx.send(()).unwrap();
+                }
+            });
+        }
 
         let _ = rx.recv().unwrap();
     });
@@ -91,7 +101,7 @@ fn yield_many(b: &mut test::Bencher) {
 
     let threadpool = make_exec_group(NUM_THREADS);
 
-    let tasks = TASKS_PER_CPU * num_cpus::get_physical();
+    let tasks = TASKS_PER_CPU * NUM_THREADS;
     let (tx, rx) = mpsc::sync_channel(tasks);
 
     b.iter(move || {
@@ -99,12 +109,10 @@ fn yield_many(b: &mut test::Bencher) {
         for _ in 0..tasks {
             let tx = tx.clone();
 
-            threadpool.spawn_with_local_spawner(move |spawner| {
-                spawner.spawn(async move {
-                    let backoff = Backoff(NUM_YIELD);
-                    backoff.await;
-                    tx.send(()).unwrap();
-                });
+            threadpool.spawn(async move {
+                let backoff = Backoff(NUM_YIELD);
+                backoff.await;
+                tx.send(()).unwrap();
             });
         }
 

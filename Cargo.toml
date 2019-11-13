@@ -16,6 +16,8 @@ futures-util = { version = "0.3", default-features=false }
 tokio = { git = "https://github.com/tokio-rs/tokio.git" }
 num_cpus = "1.11"
 
+mimalloc = { version = "*", default-features = false }
+
 [features]
 tls_exec = []
 lb_ahash = ["ahash"]

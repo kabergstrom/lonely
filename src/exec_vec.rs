@@ -1,12 +1,12 @@
 use crate::Ring;
 use std::{
     cell::UnsafeCell,
-    collections::VecDeque,
     future::*,
     hash::{BuildHasher, Hash},
     pin::Pin,
     ptr::NonNull,
     rc::Rc,
+    sync::Arc,
     task::*,
 };
 
@@ -41,7 +41,6 @@ unsafe fn recomp_fat<T: ?Sized>(components: [usize; 2]) -> *const T {
     *ptr_ref
 }
 
-#[inline(always)]
 unsafe fn create_future_obj<T: Future<Output = ()> + 'static>(
     executor: *const ExecInner,
     f: T,
@@ -61,16 +60,16 @@ unsafe fn create_future_obj<T: Future<Output = ()> + 'static>(
 }
 
 struct ExecInner {
-    poll_queue: UnsafeCell<VecDeque<NonNull<()>>>,
+    poll_queue: UnsafeCell<Vec<NonNull<()>>>,
     recv_buffer: UnsafeCell<Vec<NonNull<()>>>,
     send_queue: UnsafeCell<Option<SendQueue>>,
 }
 impl ExecInner {
-    unsafe fn poll_queue_mut<'a>(&'a self) -> &'a mut VecDeque<NonNull<()>> {
+    unsafe fn poll_queue_mut<'a>(&'a self) -> &'a mut Vec<NonNull<()>> {
         let queue = &mut *self.poll_queue.get();
-        std::mem::transmute::<&mut VecDeque<NonNull<()>>, &'a mut VecDeque<NonNull<()>>>(queue)
+        std::mem::transmute::<&mut Vec<NonNull<()>>, &'a mut Vec<NonNull<()>>>(queue)
     }
-    unsafe fn poll_queue(&self) -> &VecDeque<NonNull<()>> {
+    unsafe fn poll_queue(&self) -> &Vec<NonNull<()>> {
         &*self.poll_queue.get()
     }
     unsafe fn receiver(&self) -> Option<&SendQueue> {
@@ -95,7 +94,7 @@ impl Exec {
     pub fn new() -> Self {
         Self {
             inner: Rc::new(ExecInner {
-                poll_queue: UnsafeCell::new(VecDeque::with_capacity(10_000)),
+                poll_queue: UnsafeCell::new(Vec::with_capacity(10_000)),
                 recv_buffer: UnsafeCell::new(Vec::with_capacity(64)),
                 send_queue: UnsafeCell::new(None),
             }),
@@ -110,7 +109,7 @@ impl Exec {
     pub fn send_handle(&self) -> SendHandle {
         unsafe {
             let send_queue = &mut *self.inner.send_queue.get();
-            let sender = send_queue.get_or_insert_with(|| SendQueue::new(1_024));
+            let sender = send_queue.get_or_insert_with(|| SendQueue::new(10_000));
             SendHandle {
                 sender: sender.clone(),
             }
@@ -120,7 +119,7 @@ impl Exec {
     pub fn spawn<T: Future<Output = ()> + 'static>(&self, f: T) {
         unsafe {
             let future_obj = create_future_obj(self.inner.as_ref(), f);
-            self.inner.poll_queue_mut().push_back(future_obj);
+            self.inner.poll_queue_mut().push(future_obj);
         }
     }
 
@@ -131,23 +130,24 @@ impl Exec {
             let receiver = self.inner.receiver();
             if let Some(receiver) = receiver {
                 let poll_queue = self.inner.poll_queue_mut();
-                let recv_buf = &mut *self.inner.recv_buffer.get();
                 loop {
-                    let futures_received =
-                        receiver.pop_up_to(recv_buf.capacity(), recv_buf.as_mut_ptr());
-                    recv_buf.set_len(futures_received);
+                    let batch_size = std::cmp::min(64, poll_queue.capacity() - poll_queue.len());
+                    let futures_received = receiver.pop_up_to(
+                        batch_size,
+                        poll_queue.as_mut_ptr().offset(poll_queue.len() as isize),
+                    );
                     if futures_received == 0 {
                         break;
                     }
                     for i in 0..futures_received {
-                        let ptr = *recv_buf.get_unchecked(i);
+                        let ptr = *poll_queue.get_unchecked(i + poll_queue.len());
                         let rc = ptr_to_rc(ptr);
                         let value = &mut *(&rc.executor as *const *const ExecInner
                             as *mut *const ExecInner);
                         *value = self.inner.as_ref() as *const ExecInner;
                         std::mem::forget(rc);
-                        poll_queue.push_back(ptr);
                     }
+                    poll_queue.set_len(poll_queue.len() + futures_received);
                 }
             }
             let poll_queue = self.inner.poll_queue();
@@ -197,16 +197,7 @@ pub struct SendHandle {
 unsafe impl Send for SendHandle {}
 impl SendHandle {
     pub fn send<T: Future<Output = ()> + Send + 'static>(&self, f: T) -> bool {
-        unsafe {
-            self.sender
-                .push(create_future_obj(std::ptr::null(), f))
-                .is_none()
-        }
-    }
-    /// Returns f back to the caller if the send was not successful
-    #[inline(always)]
-    fn send_internal(&self, f: NonNull<()>) -> Option<NonNull<()>> {
-        self.sender.push(f)
+        unsafe { self.sender.push(create_future_obj(std::ptr::null(), f)) }
     }
 }
 
@@ -223,7 +214,7 @@ unsafe fn wake(f: *const ()) {
     let rc = ptr_to_rc(ptr);
     if *rc.task_state.get() == TaskState::None {
         *rc.task_state.get() = TaskState::Waking;
-        (&*rc.executor).poll_queue_mut().push_back(ptr);
+        (&*rc.executor).poll_queue_mut().push(ptr);
         // ownership of the RC transfer to the poll_queue
         std::mem::forget(rc);
     }
@@ -234,9 +225,7 @@ pub unsafe fn wake_by_ref(f: *const ()) {
     let rc = ptr_to_rc(ptr);
     if *rc.task_state.get() == TaskState::None {
         *rc.task_state.get() = TaskState::Waking;
-        (&*rc.executor)
-            .poll_queue_mut()
-            .push_back(rc_to_ptr(rc.clone()));
+        (&*rc.executor).poll_queue_mut().push(rc_to_ptr(rc.clone()));
     }
     std::mem::forget(rc);
 }
@@ -307,7 +296,6 @@ pub mod load_balance {
                 *self.current_id.get() = 0;
             }
         }
-        #[inline(always)]
         fn worker_id(&self) -> usize {
             unsafe {
                 let id = *self.current_id.get();
@@ -315,7 +303,6 @@ pub mod load_balance {
                 id
             }
         }
-        #[inline(always)]
         fn worker_id_hash(&self, _hash: u64) -> usize {
             self.worker_id()
         }
@@ -336,7 +323,7 @@ impl LocalSpawn {
     pub fn spawn<T: Future<Output = ()> + 'static>(&self, f: T) {
         unsafe {
             let poll_queue = (&*self.executor).poll_queue_mut();
-            poll_queue.push_back(create_future_obj(self.executor, f));
+            poll_queue.push(create_future_obj(self.executor, f));
         }
     }
 }
@@ -365,12 +352,19 @@ impl<F: FnOnce(LocalSpawn)> Future for GlobalSpawn<F> {
 }
 
 #[cfg(feature = "lb_ahash")]
-pub type DefaultBuildHasher = ahash::ABuildHasher;
-#[cfg(not(feature = "lb_ahash"))]
-pub type DefaultBuildHasher =
-    std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
 #[derive(Clone)]
-pub struct ExecGroup<L: LoadBalanceStrategy, H: BuildHasher = DefaultBuildHasher> {
+pub struct ExecGroup<L: LoadBalanceStrategy, H: BuildHasher = ahash::ABuildHasher> {
+    send_handles: Vec<SendHandle>,
+    load_balance: L,
+    hasher: H,
+}
+
+#[cfg(not(feature = "lb_ahash"))]
+#[derive(Clone)]
+pub struct ExecGroup<
+    L: LoadBalanceStrategy,
+    H: BuildHasher = std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>,
+> {
     send_handles: Vec<SendHandle>,
     load_balance: L,
     hasher: H,
@@ -384,30 +378,14 @@ impl<L: LoadBalanceStrategy, H: BuildHasher> ExecGroup<L, H> {
             hasher,
         }
     }
-    #[inline(always)]
     pub fn spawn_with_local_spawner<F: FnOnce(LocalSpawn) + Send + 'static>(&self, f: F) {
-        let mut future_obj =
-            unsafe { create_future_obj(std::ptr::null(), GlobalSpawn { f: Some(f) }) };
-        loop {
-            let worker_id = self.load_balance.worker_id();
-            match self.send_handles[worker_id].send_internal(future_obj) {
-                Some(recycled) => future_obj = recycled,
-                None => break,
-            }
-        }
+        let worker_id = self.load_balance.worker_id();
+        self.send_handles[worker_id].send(GlobalSpawn { f: Some(f) });
     }
-    #[inline(always)]
     pub fn spawn<T: Future<Output = ()> + Send + 'static>(&self, f: T) {
-        let mut future_obj = unsafe { create_future_obj(std::ptr::null(), f) };
-        loop {
-            let worker_id = self.load_balance.worker_id();
-            match self.send_handles[worker_id].send_internal(future_obj) {
-                Some(recycled) => future_obj = recycled,
-                None => break,
-            }
-        }
+        let worker_id = self.load_balance.worker_id();
+        self.send_handles[worker_id].send(f);
     }
-    #[inline(always)]
     pub fn spawn_with_hash<T: Future<Output = ()> + Send + 'static, HV: Hash>(
         &self,
         f: T,
