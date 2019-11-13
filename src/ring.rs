@@ -1,4 +1,4 @@
-use crossbeam_utils::CachePadded;
+use crate::cache_padded::CachePadded;
 use std::alloc::Layout;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

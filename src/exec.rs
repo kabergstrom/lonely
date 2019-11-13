@@ -369,7 +369,6 @@ pub type DefaultBuildHasher = ahash::ABuildHasher;
 #[cfg(not(feature = "lb_ahash"))]
 pub type DefaultBuildHasher =
     std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
-#[derive(Clone)]
 pub struct ExecGroup<L: LoadBalanceStrategy, H: BuildHasher = DefaultBuildHasher> {
     send_handles: Vec<SendHandle>,
     load_balance: L,
