@@ -122,10 +122,10 @@ fn yield_many(b: &mut test::Bencher) {
     });
 }
 
-// The stabilized Waker API effectively penalizes designs like `lonely`,
+// The stabilized Waker API effectively penalizes designs like `lonely`
 // since the removal of LocalWaker: https://boats.gitlab.io/blog/post/wakers-ii/
 // For lonely I've explicitly chosen to NOT implement the Waker's `Send/Sync` properties,
-// which makes it unsound. Very unfortunate, but the alternative would be too costly for my goals.
+// which makes it unsound. Very unfortunate, but the whole point is to avoid atomic operations.
 // #[bench]
 // fn ping_pong(b: &mut test::Bencher) {
 //     const NUM_PINGS: usize = 1_000;
