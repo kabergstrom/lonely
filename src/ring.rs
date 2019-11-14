@@ -33,6 +33,7 @@ impl<T> Drop for Ring<T> {
 unsafe impl<T> Send for Ring<T> {}
 unsafe impl<T> Sync for Ring<T> {}
 
+/// A heap-allocated `Ring<T>` that implements `Send` + `Sync` + `Clone`.
 pub struct HeapRing<T> {
     ring: Arc<Ring<T>>,
 }

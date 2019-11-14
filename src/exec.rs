@@ -1,6 +1,5 @@
 use crate::alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use crate::HeapRing;
-pub use async_task::JoinHandle;
 use core::{
     cell::UnsafeCell,
     future::*,
@@ -10,8 +9,16 @@ use core::{
     task::*,
 };
 
-type TaskTag = MaybeUninit<Rc<ExecInner>>;
-type Task = async_task::Task<TaskTag>;
+/// Tag used to track internal state
+#[repr(transparent)]
+pub struct TaskTag(MaybeUninit<Rc<ExecInner>>);
+impl TaskTag {
+    fn new(executor: Rc<ExecInner>) -> Self {
+        Self(MaybeUninit::new(executor))
+    }
+}
+pub type Task = async_task::Task<TaskTag>;
+pub type JoinHandle<R> = async_task::JoinHandle<R, TaskTag>;
 #[repr(transparent)]
 struct SendTask(Task);
 unsafe impl Send for SendTask {}
@@ -19,7 +26,7 @@ type SendQueue = HeapRing<SendTask>;
 fn spawn_task<R: 'static, T: Future<Output = R> + 'static>(
     f: T,
     executor: TaskTag,
-) -> JoinHandle<R, TaskTag> {
+) -> JoinHandle<R> {
     let (task, handle) = create_task(f, executor);
     task.schedule();
     handle
@@ -27,12 +34,12 @@ fn spawn_task<R: 'static, T: Future<Output = R> + 'static>(
 fn create_task<R: 'static, T: Future<Output = R> + 'static>(
     f: T,
     tag: TaskTag,
-) -> (Task, JoinHandle<R, TaskTag>) {
+) -> (Task, JoinHandle<R>) {
     unsafe {
         async_task::spawn(
             f,
             |task| {
-                let exec = &*(&*(task.tag() as *const TaskTag)).as_ptr();
+                let exec = &*(&*(task.tag() as *const TaskTag)).0.as_ptr();
                 exec.poll_queue_mut().push_back(task);
             },
             tag,
@@ -94,10 +101,7 @@ impl Exec {
             }
         }
     }
-    pub fn spawn<R: 'static, T: Future<Output = R> + 'static>(
-        &self,
-        f: T,
-    ) -> JoinHandle<R, TaskTag> {
+    pub fn spawn<R: 'static, T: Future<Output = R> + 'static>(&self, f: T) -> JoinHandle<R> {
         spawn_task(f, TaskTag::new(self.inner.clone()))
     }
 
@@ -173,7 +177,7 @@ mod thread_local {
     }
 
     /// Spawn using the thread-local executor
-    pub fn spawn<T: Future<Output = ()> + 'static>(f: T) {
+    pub fn spawn<R: 'static, T: Future<Output = R> + 'static>(f: T) -> JoinHandle<R> {
         EXECUTOR.with(|exec| exec.spawn(f))
     }
 
@@ -237,10 +241,7 @@ pub struct LocalSpawn {
     executor: Rc<ExecInner>,
 }
 impl LocalSpawn {
-    pub fn spawn<R: 'static, T: Future<Output = R> + 'static>(
-        &self,
-        f: T,
-    ) -> JoinHandle<R, TaskTag> {
+    pub fn spawn<R: 'static, T: Future<Output = R> + 'static>(&self, f: T) -> JoinHandle<R> {
         spawn_task(f, TaskTag::new(self.executor.clone()))
     }
 }
