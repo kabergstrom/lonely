@@ -1,3 +1,4 @@
+use crate::alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use crate::HeapRing;
 pub use async_task::JoinHandle;
 use core::{
@@ -8,8 +9,6 @@ use core::{
     pin::Pin,
     task::*,
 };
-#[cfg(feature = "std")]
-use std::{collections::VecDeque, rc::Rc};
 
 type TaskTag = MaybeUninit<Rc<ExecInner>>;
 type Task = async_task::Task<TaskTag>;
@@ -47,8 +46,7 @@ pub struct ExecInner {
 }
 impl ExecInner {
     unsafe fn poll_queue_mut<'a>(&'a self) -> &'a mut VecDeque<Task> {
-        let queue = &mut *self.poll_queue.get();
-        std::mem::transmute::<&mut VecDeque<Task>, &'a mut VecDeque<Task>>(queue)
+        &mut *self.poll_queue.get()
     }
     unsafe fn poll_queue(&self) -> &VecDeque<Task> {
         &*self.poll_queue.get()
@@ -120,7 +118,7 @@ impl Exec {
                         let task = sent_task.0;
                         // Set the executor tag of the received task
                         let mut_tag_ptr = task.tag() as *const TaskTag as *mut TaskTag;
-                        std::ptr::write(mut_tag_ptr, TaskTag::new(self.inner.clone()));
+                        core::ptr::write(mut_tag_ptr, TaskTag::new(self.inner.clone()));
                         poll_queue.push_back(task);
                     }
                 }
@@ -154,7 +152,7 @@ unsafe impl Send for SendHandle {}
 impl SendHandle {
     pub fn send<T: Future<Output = ()> + Send + 'static>(&self, f: T) -> bool {
         unsafe {
-            let (task, _) = create_task(f, std::mem::zeroed());
+            let (task, _) = create_task(f, core::mem::zeroed());
             self.sender.push(SendTask(task)).is_none()
         }
     }
@@ -253,23 +251,28 @@ struct GlobalSpawn<F: FnOnce(LocalSpawn)> {
 impl<F: FnOnce(LocalSpawn)> Unpin for GlobalSpawn<F> {}
 impl<F: FnOnce(LocalSpawn)> Future for GlobalSpawn<F> {
     type Output = ();
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> std::task::Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> core::task::Poll<Self::Output> {
         let executor = unsafe { async_task::Task::<Rc<ExecInner>>::tag_from_context(cx) };
         if let Some(f) = self.f.take() {
             (f)(LocalSpawn {
                 executor: executor.clone(),
             });
         }
-        std::task::Poll::Ready(())
+        core::task::Poll::Ready(())
     }
 }
 
-#[cfg(feature = "lb_ahash")]
-pub type DefaultBuildHasher = ahash::ABuildHasher;
-#[cfg(not(feature = "lb_ahash"))]
+#[cfg(feature = "std")]
 pub type DefaultBuildHasher =
-    std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
+    core::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
+#[cfg(feature = "std")]
 pub struct ExecGroup<L: LoadBalanceStrategy, H: BuildHasher = DefaultBuildHasher> {
+    send_handles: Vec<SendHandle>,
+    load_balance: L,
+    hasher: H,
+}
+#[cfg(not(feature = "std"))]
+pub struct ExecGroup<L: LoadBalanceStrategy, H: BuildHasher> {
     send_handles: Vec<SendHandle>,
     load_balance: L,
     hasher: H,
@@ -285,7 +288,8 @@ impl<L: LoadBalanceStrategy, H: BuildHasher> ExecGroup<L, H> {
     }
     #[inline(always)]
     pub fn spawn_with_local_spawner<F: FnOnce(LocalSpawn) + Send + 'static>(&self, f: F) {
-        let (task, handle) = unsafe { create_task(GlobalSpawn { f: Some(f) }, std::mem::zeroed()) };
+        let (task, handle) =
+            unsafe { create_task(GlobalSpawn { f: Some(f) }, core::mem::zeroed()) };
         drop(handle);
         let mut task = SendTask(task);
         loop {
@@ -298,7 +302,7 @@ impl<L: LoadBalanceStrategy, H: BuildHasher> ExecGroup<L, H> {
     }
     #[inline(always)]
     pub fn spawn<T: Future<Output = ()> + Send + 'static>(&self, f: T) {
-        let (task, handle) = unsafe { create_task(f, std::mem::zeroed()) };
+        let (task, handle) = unsafe { create_task(f, core::mem::zeroed()) };
         drop(handle);
         let mut task = SendTask(task);
         loop {
@@ -315,7 +319,7 @@ impl<L: LoadBalanceStrategy, H: BuildHasher> ExecGroup<L, H> {
         f: T,
         hash: HV,
     ) {
-        use std::hash::Hasher;
+        use core::hash::Hasher;
         let mut hasher = self.hasher.build_hasher();
         hash.hash(&mut hasher);
         let hash_u64 = hasher.finish();

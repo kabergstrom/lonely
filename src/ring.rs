@@ -1,7 +1,7 @@
+use crate::alloc::alloc::Layout;
+use crate::alloc::sync::Arc;
 use crate::cache_padded::CachePadded;
-use core::alloc::Layout;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 pub struct Ring<T> {
     cons_head: CachePadded<AtomicUsize>,
@@ -18,12 +18,12 @@ impl<T> Drop for Ring<T> {
         while c_head != p_tail {
             let idx = c_head & self.mask;
             unsafe {
-                std::ptr::drop_in_place(self.buffer.offset(idx as isize));
+                core::ptr::drop_in_place(self.buffer.offset(idx as isize));
             }
             c_head = c_head.wrapping_add(1);
         }
         unsafe {
-            std::alloc::dealloc(
+            crate::alloc::alloc::dealloc(
                 self.buffer as *mut u8,
                 buffer_size::<T>(self.mask + 1).unwrap().0,
             );
@@ -33,7 +33,6 @@ impl<T> Drop for Ring<T> {
 unsafe impl<T> Send for Ring<T> {}
 unsafe impl<T> Sync for Ring<T> {}
 
-#[cfg(feature = "std")]
 pub struct HeapRing<T> {
     ring: Arc<Ring<T>>,
 }
@@ -45,7 +44,6 @@ impl<T> Clone for HeapRing<T> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<T> HeapRing<T> {
     #[cfg(test)]
     fn new_custom_start(capacity: usize, start: usize) -> Self {
@@ -81,13 +79,13 @@ fn padding_needed_for(len: usize, align: usize) -> usize {
 }
 
 // this is copied from the Layout nightly features
-fn buffer_size<T>(n: usize) -> Result<(Layout, usize), std::fmt::Error> {
-    let layout = std::alloc::Layout::new::<T>();
+fn buffer_size<T>(n: usize) -> Result<(Layout, usize), crate::alloc::fmt::Error> {
+    let layout = Layout::new::<T>();
     let padded_size = layout
         .size()
         .checked_add(padding_needed_for(layout.size(), layout.align()))
-        .ok_or(std::fmt::Error)?;
-    let alloc_size = padded_size.checked_mul(n).ok_or(std::fmt::Error)?;
+        .ok_or(crate::alloc::fmt::Error)?;
+    let alloc_size = padded_size.checked_mul(n).ok_or(crate::alloc::fmt::Error)?;
 
     unsafe {
         // self.align is already known to be valid and alloc_size has been
@@ -121,7 +119,7 @@ impl<T> Ring<T> {
         }
         let mask = capacity - 1;
         let (layout, _) = buffer_size::<T>(capacity).expect("buffer too big");
-        let buffer = unsafe { std::alloc::alloc(layout) as *mut T };
+        let buffer = unsafe { crate::alloc::alloc::alloc(layout) as *mut T };
         Self {
             cons_head: CachePadded::new(AtomicUsize::new(0)),
             cons_tail: CachePadded::new(AtomicUsize::new(0)),
@@ -234,12 +232,6 @@ impl<T> Ring<T> {
             0
         };
         let first_seg_size = to_read.saturating_sub(second_seg_size);
-        // dbg!(c_head);
-        // dbg!(cons_next);
-        // dbg!(read_idx);
-        // dbg!(to_read);
-        // dbg!(second_seg_size);
-        // dbg!(first_seg_size);
         let first_seg_ptr = self.buffer.offset(read_idx as isize);
         core::ptr::copy_nonoverlapping(first_seg_ptr, out_buf, first_seg_size);
         core::ptr::copy_nonoverlapping(

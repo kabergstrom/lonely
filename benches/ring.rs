@@ -3,7 +3,7 @@
 extern crate test;
 use lonely::HeapRing;
 const ELEMENTS: usize = 100_000;
-const NUM_PRODUCERS: usize = 10;
+const NUM_PRODUCERS: usize = 4;
 const ELEMENTS_PER_PRODUCER: usize = ELEMENTS / NUM_PRODUCERS;
 
 #[bench]
