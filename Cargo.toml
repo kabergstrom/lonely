@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 ahash = { version = "0.2", optional = true }
+async-task = { git = "https://github.com/kabergstrom/async-task.git" }
 
 [dev-dependencies]
 futures-util = { version = "0.3", default-features=false }

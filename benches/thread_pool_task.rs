@@ -2,7 +2,7 @@
 
 extern crate test;
 
-use lonely::{load_balance, Exec, ExecGroup, LocalSpawn};
+use lonely::exec_task::{load_balance, Exec, ExecGroup, LocalSpawn};
 use tokio::sync::oneshot;
 
 use mimalloc::MiMalloc;

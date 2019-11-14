@@ -97,6 +97,7 @@ impl<T> CachePadded<T> {
     /// let value = padded_value.into_inner();
     /// assert_eq!(value, 7);
     /// ```
+    #[allow(unused)]
     pub fn into_inner(self) -> T {
         self.value
     }

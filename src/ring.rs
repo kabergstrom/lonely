@@ -33,10 +33,16 @@ impl<T> Drop for Ring<T> {
 unsafe impl<T> Send for Ring<T> {}
 unsafe impl<T> Sync for Ring<T> {}
 
-#[derive(Clone)]
 #[cfg(feature = "std")]
 pub struct HeapRing<T> {
     ring: Arc<Ring<T>>,
+}
+impl<T> Clone for HeapRing<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ring: Arc::clone(&self.ring),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
