@@ -1,21 +1,21 @@
 #![feature(test)]
 
 extern crate test;
-use lonely::Ring;
+use lonely::HeapRing;
 const ELEMENTS: usize = 100_000;
 const NUM_PRODUCERS: usize = 10;
 const ELEMENTS_PER_PRODUCER: usize = ELEMENTS / NUM_PRODUCERS;
 
 #[bench]
 fn ring_spsc(b: &mut test::Bencher) {
-    let buffer = Ring::<u32>::new(1_000);
+    let buffer = HeapRing::<u32>::new(1_000);
     let producer_buf = producer_thread(buffer.clone());
 
     b.iter(|| {
         producer_buf.push(ELEMENTS as u32);
         let mut num_received = 0;
         while num_received != ELEMENTS {
-            if let Some(_) = buffer.pop() {
+            if let Some(_) = buffer.pop_single() {
                 num_received += 1;
             }
         }
@@ -24,12 +24,12 @@ fn ring_spsc(b: &mut test::Bencher) {
     producer_buf.push(0);
 }
 
-fn producer_thread(output_buf: Ring<u32>) -> Ring<u32> {
-    let producer_buf = Ring::new(4);
+fn producer_thread(output_buf: HeapRing<u32>) -> HeapRing<u32> {
+    let producer_buf = HeapRing::new(4);
     let to_return = producer_buf.clone();
     std::thread::spawn(move || loop {
         let to_produce = loop {
-            if let Some(to_produce) = producer_buf.pop() {
+            if let Some(to_produce) = producer_buf.pop_single() {
                 if to_produce == 0 {
                     return;
                 } else {
@@ -47,13 +47,13 @@ fn producer_thread(output_buf: Ring<u32>) -> Ring<u32> {
     });
     to_return.push(1);
     // wait for thread to start
-    while let None = to_return.pop() {}
+    while let None = to_return.pop_single() {}
     to_return
 }
 
 #[bench]
 fn ring_mpsc(b: &mut test::Bencher) {
-    let buffer = Ring::<u32>::new(10_000);
+    let buffer = HeapRing::<u32>::new(10_000);
     let mut producer_buffers = Vec::new();
     for _ in 0..NUM_PRODUCERS {
         producer_buffers.push(producer_thread(buffer.clone()));
@@ -65,7 +65,7 @@ fn ring_mpsc(b: &mut test::Bencher) {
         }
         let mut num_received = 0;
         while num_received != ELEMENTS {
-            if let Some(_) = buffer.pop() {
+            if let Some(_) = buffer.pop_single() {
                 num_received += 1;
             }
         }
@@ -103,7 +103,7 @@ fn ring_mpsc_batch_pop_bench(
     num_elements: usize,
 ) {
     let elements_per_producer = num_elements / num_producers;
-    let buffer = Ring::<u32>::new(10_000);
+    let buffer = HeapRing::<u32>::new(10_000);
     let mut producer_buffers = Vec::new();
     for _ in 0..num_producers {
         producer_buffers.push(producer_thread(buffer.clone()));
