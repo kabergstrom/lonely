@@ -58,7 +58,10 @@ impl<T> HeapRing<T> {
         }
     }
     pub fn push(&self, value: T) -> Option<T> {
-        self.ring.push(value)
+        self.ring.push_fail_limit(value, 0)
+    }
+    pub fn push_size_limit(&self, value: T, size_limit: usize) -> Option<T> {
+        self.ring.push_size_limit(value, size_limit)
     }
     /// Popping a single object at a time is not good for performance.
     /// Performance is the whole point of this crate, so let's hide it from the docs.
@@ -131,14 +134,25 @@ impl<T> Ring<T> {
         }
     }
 
+    pub fn capacity(&self) -> usize {
+        self.mask + 1
+    }
     /// Puts provided value in the ring buffer.
     /// If the buffer has insufficient space, Some(value) is returned.
     pub fn push(&self, value: T) -> Option<T> {
+        self.push_fail_limit(value, 0)
+    }
+
+    pub fn push_size_limit(&self, value: T, size_limit: usize) -> Option<T> {
+        self.push_fail_limit(value, (self.capacity() - 1).saturating_sub(size_limit))
+    }
+
+    fn push_fail_limit(&self, value: T, fail_limit: usize) -> Option<T> {
         let mut p_head = self.prod_head.load(Ordering::Relaxed);
         let c_tail = self.cons_tail.load(Ordering::Relaxed);
         let prod_next = loop {
             let num_free_entries = self.mask.wrapping_add(c_tail).wrapping_sub(p_head);
-            if num_free_entries == 0 {
+            if num_free_entries <= fail_limit {
                 return Some(value);
             }
             let prod_next = p_head.wrapping_add(1);
@@ -276,6 +290,15 @@ mod test {
     fn test_empty_fail() {
         let buffer = Ring::<u32>::new(128);
         assert_eq!(buffer.pop_single(), None);
+    }
+
+    #[test]
+    fn test_push_size_limit() {
+        let buffer = Ring::<u32>::new(128);
+        assert_eq!(buffer.push_size_limit(3u32, 0), Some(3u32));
+        assert_eq!(buffer.push_size_limit(3u32, 1), None);
+        assert_eq!(buffer.push_size_limit(3u32, 1), Some(3u32));
+        assert_eq!(buffer.push_size_limit(3u32, 2), None);
     }
 
     #[test]

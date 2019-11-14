@@ -39,7 +39,9 @@ fn main() {
             let guard = driver::set_default(&handle);
             loop {
                 exec.poll();
-                reactor.turn(Some(std::time::Duration::from_millis(0)));
+                reactor
+                    .turn(Some(std::time::Duration::from_millis(0)))
+                    .unwrap();
             }
             drop(guard);
         });
