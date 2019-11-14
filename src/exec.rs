@@ -1,14 +1,14 @@
-use crate::Ring;
-use std::{
+use crate::HeapRing;
+use core::{
     cell::UnsafeCell,
-    collections::VecDeque,
     future::*,
     hash::{BuildHasher, Hash},
     pin::Pin,
     ptr::NonNull,
-    rc::Rc,
     task::*,
 };
+#[cfg(feature = "std")]
+use std::{collections::VecDeque, rc::Rc};
 
 #[repr(u8)]
 #[derive(PartialEq)]
@@ -25,7 +25,7 @@ struct FutureObj<T: ?Sized> {
     value: T,
 }
 
-type SendQueue = Ring<NonNull<()>>;
+type SendQueue = HeapRing<NonNull<()>>;
 
 /// Decompose a fat pointer into its constituent [pointer, extdata] pair
 unsafe fn decomp_fat<T: ?Sized>(ptr: *const T) -> [usize; 2] {
@@ -475,7 +475,7 @@ mod test {
                 let exec = exec_send.into_exec();
                 loop {
                     exec.poll();
-                    std::thread::sleep_ms(0);
+                    std::thread::sleep(std::time::Duration::from_millis(0));
                 }
             });
         }

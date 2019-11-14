@@ -17,5 +17,8 @@ num_cpus = "1.11"
 mimalloc = { version = "*", default-features = false }
 
 [features]
+# would be nice to support no_std
+default = ["std"]
+std = []
 tls_exec = []
 lb_ahash = ["ahash"]

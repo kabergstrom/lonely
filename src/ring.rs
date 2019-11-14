@@ -1,11 +1,9 @@
 use crate::cache_padded::CachePadded;
-use std::alloc::Layout;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use core::alloc::Layout;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-struct RingInner<T> {
+pub struct Ring<T> {
     cons_head: CachePadded<AtomicUsize>,
     cons_tail: CachePadded<AtomicUsize>,
     prod_head: CachePadded<AtomicUsize>,
@@ -13,7 +11,7 @@ struct RingInner<T> {
     buffer: *mut T,
     mask: usize,
 }
-impl<T> Drop for RingInner<T> {
+impl<T> Drop for Ring<T> {
     fn drop(&mut self) {
         let p_tail = self.prod_head.load(Ordering::Acquire);
         let mut c_head = self.cons_tail.load(Ordering::Acquire);
@@ -32,37 +30,42 @@ impl<T> Drop for RingInner<T> {
         }
     }
 }
-unsafe impl<T> Send for RingInner<T> {}
-unsafe impl<T> Sync for RingInner<T> {}
+unsafe impl<T> Send for Ring<T> {}
+unsafe impl<T> Sync for Ring<T> {}
 
 #[derive(Clone)]
-pub struct Ring<T> {
-    ring: Arc<RingInner<T>>,
+#[cfg(feature = "std")]
+pub struct HeapRing<T> {
+    ring: Arc<Ring<T>>,
 }
 
-impl<T> Ring<T> {
+#[cfg(feature = "std")]
+impl<T> HeapRing<T> {
     #[cfg(test)]
     fn new_custom_start(capacity: usize, start: usize) -> Self {
         Self {
-            ring: Arc::new(RingInner::new_custom_start(capacity, start)),
+            ring: Arc::new(Ring::new_custom_start(capacity, start)),
         }
     }
     pub fn new(capacity: usize) -> Self {
         Self {
-            ring: Arc::new(RingInner::new(capacity)),
+            ring: Arc::new(Ring::new(capacity)),
         }
     }
     pub fn push(&self, value: T) -> Option<T> {
         self.ring.push(value)
     }
-    pub fn pop(&self) -> Option<T> {
-        self.ring.pop()
+    /// Popping a single object at a time is not good for performance.
+    /// Performance is the whole point of this crate, so let's hide it from the docs.
+    #[doc(hidden)]
+    pub fn pop_single(&self) -> Option<T> {
+        self.ring.pop_single()
     }
     pub unsafe fn pop_up_to(&self, max: usize, out_buf: *mut T) -> usize {
-        self.ring.pop_up_to(max, 1, out_buf)
+        self.ring.pop_internal(max, 1, out_buf)
     }
     pub unsafe fn pop_exact(&self, max: usize, out_buf: *mut T) -> usize {
-        self.ring.pop_up_to(max, max, out_buf)
+        self.ring.pop_internal(max, max, out_buf)
     }
 }
 
@@ -71,6 +74,7 @@ fn padding_needed_for(len: usize, align: usize) -> usize {
     len_rounded_up.wrapping_sub(len)
 }
 
+// this is copied from the Layout nightly features
 fn buffer_size<T>(n: usize) -> Result<(Layout, usize), std::fmt::Error> {
     let layout = std::alloc::Layout::new::<T>();
     let padded_size = layout
@@ -89,7 +93,7 @@ fn buffer_size<T>(n: usize) -> Result<(Layout, usize), std::fmt::Error> {
     }
 }
 
-impl<T> RingInner<T> {
+impl<T> Ring<T> {
     #[cfg(test)]
     fn new_custom_start(capacity: usize, start: usize) -> Self {
         let ring = Self::new(capacity);
@@ -102,7 +106,7 @@ impl<T> RingInner<T> {
 
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.checked_next_power_of_two().expect("size overflow");
-        if capacity > std::usize::MAX / 2 - 1 {
+        if capacity > core::usize::MAX / 2 - 1 {
             // cons and prod must be
             panic!("buffer too big");
         }
@@ -150,7 +154,7 @@ impl<T> RingInner<T> {
         };
         let write_idx = p_head & self.mask;
         unsafe {
-            std::ptr::write(self.buffer.offset(write_idx as isize), value);
+            core::ptr::write(self.buffer.offset(write_idx as isize), value);
         }
         loop {
             match self.prod_tail.compare_exchange_weak(
@@ -171,10 +175,10 @@ impl<T> RingInner<T> {
         None
     }
 
-    pub fn pop(&self) -> Option<T> {
+    pub fn pop_single(&self) -> Option<T> {
         unsafe {
-            let mut out_value = std::mem::MaybeUninit::uninit();
-            let num_read = self.pop_up_to(1, 1, out_value.as_mut_ptr());
+            let mut out_value = core::mem::MaybeUninit::uninit();
+            let num_read = self.pop_internal(1, 1, out_value.as_mut_ptr());
             if num_read == 1 {
                 Some(out_value.assume_init())
             } else {
@@ -182,8 +186,14 @@ impl<T> RingInner<T> {
             }
         }
     }
+    pub unsafe fn pop_up_to(&self, max: usize, out_buf: *mut T) -> usize {
+        self.pop_internal(max, 1, out_buf)
+    }
+    pub unsafe fn pop_exact(&self, max: usize, out_buf: *mut T) -> usize {
+        self.pop_internal(max, max, out_buf)
+    }
 
-    pub unsafe fn pop_up_to(&self, max: usize, fail_limit: usize, out_buf: *mut T) -> usize {
+    unsafe fn pop_internal(&self, max: usize, fail_limit: usize, out_buf: *mut T) -> usize {
         let mut c_head = self.cons_head.load(Ordering::Relaxed);
 
         let (cons_next, to_read) = loop {
@@ -193,7 +203,7 @@ impl<T> RingInner<T> {
                 // no elements available
                 return 0;
             }
-            let to_read = std::cmp::min(max, entries_available);
+            let to_read = core::cmp::min(max, entries_available);
             let cons_next = c_head.wrapping_add(to_read);
             match self.cons_head.compare_exchange_weak(
                 c_head,
@@ -225,8 +235,8 @@ impl<T> RingInner<T> {
         // dbg!(second_seg_size);
         // dbg!(first_seg_size);
         let first_seg_ptr = self.buffer.offset(read_idx as isize);
-        std::ptr::copy_nonoverlapping(first_seg_ptr, out_buf, first_seg_size);
-        std::ptr::copy_nonoverlapping(
+        core::ptr::copy_nonoverlapping(first_seg_ptr, out_buf, first_seg_size);
+        core::ptr::copy_nonoverlapping(
             self.buffer,
             out_buf.offset(first_seg_size as isize),
             second_seg_size,
@@ -259,14 +269,14 @@ mod test {
     fn test_simple() {
         let buffer = Ring::new(128);
         assert_eq!(buffer.push(5u32), None);
-        assert_eq!(buffer.pop(), Some(5u32));
-        assert_eq!(buffer.pop(), None);
+        assert_eq!(buffer.pop_single(), Some(5u32));
+        assert_eq!(buffer.pop_single(), None);
     }
 
     #[test]
     fn test_empty_fail() {
         let buffer = Ring::<u32>::new(128);
-        assert_eq!(buffer.pop(), None);
+        assert_eq!(buffer.pop_single(), None);
     }
 
     #[test]
@@ -275,38 +285,39 @@ mod test {
         assert_eq!(buffer.push(5u32), None);
         assert_eq!(buffer.push(3u32), None);
         assert_eq!(buffer.push(2u32), None);
-        assert_eq!(buffer.pop(), Some(5u32));
-        assert_eq!(buffer.pop(), Some(3u32));
-        assert_eq!(buffer.pop(), Some(2u32));
-        assert_eq!(buffer.pop(), None);
+        assert_eq!(buffer.pop_single(), Some(5u32));
+        assert_eq!(buffer.pop_single(), Some(3u32));
+        assert_eq!(buffer.pop_single(), Some(2u32));
+        assert_eq!(buffer.pop_single(), None);
     }
 
     #[test]
     fn test_size_overflow() {
         // Create a new ring with 4 slots, starting at std::usize::MAX - 4.
-        let buffer = Ring::new_custom_start(4, std::usize::MAX - 4);
+        let buffer = Ring::new_custom_start(4, core::usize::MAX - 4);
         // Push/pop elements until we overflow and make sure things still work
         assert_eq!(buffer.push(5u32), None);
         assert_eq!(buffer.push(3u32), None);
         assert_eq!(buffer.push(2u32), None);
-        assert_eq!(buffer.pop(), Some(5u32));
-        assert_eq!(buffer.pop(), Some(3u32));
-        assert_eq!(buffer.pop(), Some(2u32));
+        assert_eq!(buffer.pop_single(), Some(5u32));
+        assert_eq!(buffer.pop_single(), Some(3u32));
+        assert_eq!(buffer.pop_single(), Some(2u32));
         assert_eq!(buffer.push(5u32), None);
         assert_eq!(buffer.push(3u32), None);
         assert_eq!(buffer.push(2u32), None);
-        assert_eq!(buffer.pop(), Some(5u32));
-        assert_eq!(buffer.pop(), Some(3u32));
-        assert_eq!(buffer.pop(), Some(2u32));
-        assert_eq!(buffer.pop(), None);
+        assert_eq!(buffer.pop_single(), Some(5u32));
+        assert_eq!(buffer.pop_single(), Some(3u32));
+        assert_eq!(buffer.pop_single(), Some(2u32));
+        assert_eq!(buffer.pop_single(), None);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_spsc() {
-        let buffer = Ring::<u32>::new(4);
+        let buffer = HeapRing::<u32>::new(4);
         let consumer_buf = buffer.clone();
         let consumer = std::thread::spawn(move || loop {
-            if let Some(value) = consumer_buf.pop() {
+            if let Some(value) = consumer_buf.pop_single() {
                 return value;
             }
         });
@@ -319,6 +330,7 @@ mod test {
         assert_eq!(consumer_result.unwrap(), 5u32);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_pop_up_to() {
         // Create a new ring with 4 slots, starting at std::usize::MAX - 4.
@@ -334,25 +346,28 @@ mod test {
         assert_eq!(&values, &[5, 3, 2]);
     }
 
-    struct DropTest(u32, Ring<u32>);
+    #[cfg(feature = "std")]
+    struct DropTest(u32, HeapRing<u32>);
+    #[cfg(feature = "std")]
     impl Drop for DropTest {
         fn drop(&mut self) {
             self.1.push(self.0);
         }
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_drop() {
         // Create a new ring with 4 slots, starting at std::usize::MAX - 4.
-        let buffer = Ring::new_custom_start(4, std::usize::MAX - 4);
-        let recv_buffer = Ring::new(4);
+        let buffer = HeapRing::new_custom_start(4, std::usize::MAX - 4);
+        let recv_buffer = HeapRing::new(4);
         buffer.push(DropTest(5u32, recv_buffer.clone()));
         buffer.push(DropTest(3u32, recv_buffer.clone()));
         buffer.push(DropTest(2u32, recv_buffer.clone()));
         drop(buffer);
-        assert_eq!(recv_buffer.pop(), Some(5u32));
-        assert_eq!(recv_buffer.pop(), Some(3u32));
-        assert_eq!(recv_buffer.pop(), Some(2u32));
-        assert_eq!(recv_buffer.pop(), None);
+        assert_eq!(recv_buffer.pop_single(), Some(5u32));
+        assert_eq!(recv_buffer.pop_single(), Some(3u32));
+        assert_eq!(recv_buffer.pop_single(), Some(2u32));
+        assert_eq!(recv_buffer.pop_single(), None);
     }
 }
