@@ -46,6 +46,23 @@ fn create_task<R: 'static, T: Future<Output = R> + 'static>(
         )
     }
 }
+/// Returns a `LocalSpawn` from a `core::task::Context<'_>`.
+///
+/// # Safety
+/// It is up to the caller to ensure the context comes from an `Exec`.
+#[doc(hidden)]
+pub unsafe fn local_spawn_from_context(ctx: &mut core::task::Context<'_>) -> LocalSpawn {
+    let executor = async_task::Task::<TaskTag>::tag_from_context(ctx);
+    LocalSpawn {
+        executor: (&*executor.0.as_ptr()).clone(),
+    }
+}
+
+/// Returns a future that returns `LocalSpawn`
+pub fn local_spawner() -> LocalSpawnGetter {
+    LocalSpawnGetter
+}
+
 pub struct ExecInner {
     poll_queue: UnsafeCell<VecDeque<Task>>,
     recv_buffer: UnsafeCell<Vec<SendTask>>,
@@ -246,6 +263,18 @@ impl LocalSpawn {
     }
 }
 
+/// A future that returns `LocalSpawn` for the `Exec` it runs on.
+pub struct LocalSpawnGetter;
+impl Future for LocalSpawnGetter {
+    type Output = LocalSpawn;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> core::task::Poll<Self::Output> {
+        let executor = unsafe { async_task::Task::<Rc<ExecInner>>::tag_from_context(cx) };
+        core::task::Poll::Ready(LocalSpawn {
+            executor: executor.clone(),
+        })
+    }
+}
+
 struct GlobalSpawn<F: FnOnce(LocalSpawn)> {
     f: Option<F>,
 }
@@ -254,12 +283,10 @@ impl<F: FnOnce(LocalSpawn)> Future for GlobalSpawn<F> {
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> core::task::Poll<Self::Output> {
         let executor = unsafe { async_task::Task::<Rc<ExecInner>>::tag_from_context(cx) };
-        if let Some(f) = self.f.take() {
-            (f)(LocalSpawn {
-                executor: executor.clone(),
-            });
-        }
-        core::task::Poll::Ready(())
+        let f = self.f.take().unwrap();
+        core::task::Poll::Ready((f)(LocalSpawn {
+            executor: executor.clone(),
+        }))
     }
 }
 
@@ -348,7 +375,7 @@ mod test {
         type Output = ();
         fn poll(
             mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context,
+            cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Self::Output> {
             self.counter += 1;
             if self.counter >= self.num {
@@ -371,6 +398,16 @@ mod test {
     }
 
     #[test]
+    fn test_local_spawn_getter() {
+        let exec = Exec::new();
+        exec.spawn(async {
+            let local_spawn = local_spawner().await;
+            local_spawn.spawn(async {})
+        });
+        while exec.poll() {}
+    }
+
+    #[test]
     fn test_send_group() {
         let hash_builder =
             std::hash::BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default();
@@ -388,7 +425,7 @@ mod test {
             });
         }
 
-        let mut value = Arc::new(AtomicBool::new(false));
+        let value = Arc::new(AtomicBool::new(false));
         let closure_value = value.clone();
         executor_group.spawn(async move {
             closure_value.store(true, Ordering::Relaxed);

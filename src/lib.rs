@@ -11,7 +11,9 @@ use std as alloc;
 mod cache_padded;
 mod exec;
 mod ring;
-pub use exec::{load_balance, Exec, ExecGroup, LocalSpawn};
+pub use exec::{
+    load_balance, local_spawn_from_context, local_spawner, Exec, ExecGroup, LocalSpawn,
+};
 
 #[cfg(feature = "std")]
 pub use exec::DefaultBuildHasher;
